@@ -12,7 +12,7 @@ import os
 from .db import engine
 from .models import Base
 from .routers.auth import router as auth_router
-# from .routers.assignments import router as assignments_router   # add once built
+from .routers.assignments import router as assignments_router
 # from .routers.submissions import router as submissions_router   # add once built
 # from .routers.flags import router as flags_router               # add once built
 
@@ -33,7 +33,7 @@ app.add_middleware(
 )
 
 app.include_router(auth_router)
-# app.include_router(assignments_router)
+app.include_router(assignments_router)
 # app.include_router(submissions_router)
 # app.include_router(flags_router)
 
