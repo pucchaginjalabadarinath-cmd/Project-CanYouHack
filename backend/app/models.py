@@ -34,6 +34,7 @@ from sqlalchemy import (
     Text,
     Float,
     Integer,
+    Boolean,
     ForeignKey,
     DateTime,
     Enum,
@@ -99,6 +100,14 @@ class Assignment(Base):
     pdf_url = Column(String, nullable=True)
     deadline = Column(DateTime(timezone=True), nullable=False)
     created_by = Column(String, ForeignKey("users.id"), nullable=False)
+    # Added for ISSUES.md #6 ("GET /assignments — list (role-aware:
+    # students see only non-draft ones)") - not in HANDOFF.md's original
+    # table list, so noting it here explicitly per FILE_WORKING_GUIDE.md's
+    # "don't add columns without updating HANDOFF.md" rule. Defaults to
+    # False (published) since there's no separate publish/unpublish issue
+    # yet - a professor can still pass is_draft=True at creation time to
+    # hide it from students while questions are still being set up.
+    is_draft = Column(Boolean, nullable=False, default=False)
 
     creator = relationship("User", back_populates="assignments_created")
     questions = relationship(

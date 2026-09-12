@@ -53,6 +53,10 @@ class AssignmentCreate(BaseModel):
     title: str
     pdf_url: Optional[str] = None
     deadline: datetime
+    # See models.py's comment on Assignment.is_draft (added for ISSUES.md
+    # #6) - defaults to published so existing callers that don't set it
+    # keep working.
+    is_draft: bool = False
 
 
 class AssignmentOut(BaseModel):
@@ -63,6 +67,7 @@ class AssignmentOut(BaseModel):
     pdf_url: Optional[str] = None
     deadline: datetime
     created_by: str
+    is_draft: bool
 
 
 # ---------------------------------------------------------------------------
