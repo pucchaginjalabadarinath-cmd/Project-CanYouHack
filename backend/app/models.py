@@ -1,11 +1,7 @@
 """
 SQLAlchemy models.
-Per HANDOFF.md's "DB tables (core)" section - only the `users` table is
-implemented here since auth is the current scope. Whoever builds
-assignments.py / submissions.py / flags.py adds Assignment, Question,
-Submission, SimilarityPair, AiSimilarity, PerplexityScore, FlagSummary
-to THIS file (single source of truth for schema) - do not create a second
-models file.
+Per HANDOFF.md's "DB tables (core)" section - single source of truth for
+schema. Do not create a second models file.
 
 Design note on `id`:
 Supabase Auth issues its own UUID per user (in its internal `auth.users`
@@ -13,12 +9,67 @@ table, which we don't manage). Our `users` table is a PROFILE table keyed
 by that same UUID - it stores the one thing Supabase Auth doesn't: role.
 This is the standard Supabase pattern (auth.users for credentials,
 public.users/profiles for app-specific fields).
+
+Design note on other primary keys:
+Every other table below uses a server-generated UUID (String, default
+uuid4) as its primary key, for consistency with the users table and so
+frontend routes like /professor/flags/:studentId can freely reference
+either a user id or a row id without worrying about two different key
+formats (int autoincrement vs UUID) in the same API surface.
+
+Design note on JSON columns:
+`match_regions_json` stores the matched line-range data copydetect
+produces (used by frontend/src/pages/DiffViewer.jsx). Stored as a JSON
+column rather than a stringified blob so Postgres/SQLAlchemy can
+validate/query it if that's ever needed, but the API layer (schemas.py)
+still treats it as an opaque dict/list to the frontend.
 """
 
-from sqlalchemy import Column, String
-from sqlalchemy.orm import declarative_base
+import uuid
+from datetime import datetime, timezone
+
+from sqlalchemy import (
+    Column,
+    String,
+    Text,
+    Float,
+    Integer,
+    ForeignKey,
+    DateTime,
+    Enum,
+    JSON,
+    UniqueConstraint,
+)
+from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+
+def _uuid() -> str:
+    return str(uuid.uuid4())
+
+
+def _utcnow() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+# ---------------------------------------------------------------------------
+# Enums
+# ---------------------------------------------------------------------------
+
+# native_enum=False -> stored as a plain VARCHAR with a CHECK constraint
+# instead of a Postgres CUSTOM TYPE. Keeps `Base.metadata.create_all()`
+# (used in main.py, no Alembic yet) simple to re-run/alter during the
+# hackathon without fighting Postgres enum-type migrations.
+RoleEnum = Enum("professor", "ta", "student", name="user_role", native_enum=False)
+FlagStatusEnum = Enum(
+    "pending", "reviewed", "dismissed", name="flag_status", native_enum=False
+)
+
+
+# ---------------------------------------------------------------------------
+# Core entities
+# ---------------------------------------------------------------------------
 
 
 class User(Base):
@@ -30,4 +81,171 @@ class User(Base):
     id = Column(String, primary_key=True)
     name = Column(String, nullable=False)
     email = Column(String, unique=True, nullable=False)
-    role = Column(String, nullable=False)  # "student" | "ta" | "professor"
+    role = Column(RoleEnum, nullable=False)
+    created_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    assignments_created = relationship("Assignment", back_populates="creator")
+    submissions = relationship("Submission", back_populates="student")
+    flag_summaries = relationship(
+        "FlagSummary", back_populates="student", foreign_keys="FlagSummary.student_id"
+    )
+
+
+class Assignment(Base):
+    __tablename__ = "assignments"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    title = Column(String, nullable=False)
+    pdf_url = Column(String, nullable=True)
+    deadline = Column(DateTime(timezone=True), nullable=False)
+    created_by = Column(String, ForeignKey("users.id"), nullable=False)
+
+    creator = relationship("User", back_populates="assignments_created")
+    questions = relationship(
+        "Question", back_populates="assignment", cascade="all, delete-orphan"
+    )
+
+
+class Question(Base):
+    __tablename__ = "questions"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    assignment_id = Column(String, ForeignKey("assignments.id"), nullable=False)
+    number = Column(Integer, nullable=False)
+    description = Column(Text, nullable=False)
+    # Professor's pure-AI-generated reference solution, never shown to
+    # students - used only as a calibration anchor by the detection models.
+    ai_reference_url = Column(String, nullable=True)
+
+    __table_args__ = (
+        UniqueConstraint("assignment_id", "number", name="uq_question_assignment_number"),
+    )
+
+    assignment = relationship("Assignment", back_populates="questions")
+    submissions = relationship(
+        "Submission", back_populates="question", cascade="all, delete-orphan"
+    )
+    similarity_pairs = relationship(
+        "SimilarityPair", back_populates="question", cascade="all, delete-orphan"
+    )
+    ai_similarities = relationship(
+        "AiSimilarity", back_populates="question", cascade="all, delete-orphan"
+    )
+    flag_summaries = relationship(
+        "FlagSummary", back_populates="question", cascade="all, delete-orphan"
+    )
+
+
+class Submission(Base):
+    __tablename__ = "submissions"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    question_id = Column(String, ForeignKey("questions.id"), nullable=False)
+    student_id = Column(String, ForeignKey("users.id"), nullable=False)
+    file_url = Column(String, nullable=False)
+    language = Column(String, nullable=False)  # "c" | "cpp" per HANDOFF.md scope
+    submitted_at = Column(DateTime(timezone=True), default=_utcnow, nullable=False)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "question_id", "student_id", name="uq_submission_question_student"
+        ),
+    )
+
+    question = relationship("Question", back_populates="submissions")
+    student = relationship("User", back_populates="submissions")
+    perplexity_score = relationship(
+        "PerplexityScore",
+        back_populates="submission",
+        uselist=False,
+        cascade="all, delete-orphan",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Detection model outputs
+# ---------------------------------------------------------------------------
+
+
+class SimilarityPair(Base):
+    """Student-vs-student pairwise similarity (copydetect / MOSS-style)."""
+
+    __tablename__ = "similarity_pairs"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    question_id = Column(String, ForeignKey("questions.id"), nullable=False)
+    student_a_id = Column(String, ForeignKey("users.id"), nullable=False)
+    student_b_id = Column(String, ForeignKey("users.id"), nullable=False)
+    score = Column(Float, nullable=False)  # 0-1
+    match_regions_json = Column(JSON, nullable=True)  # matched line ranges
+
+    question = relationship("Question", back_populates="similarity_pairs")
+    student_a = relationship("User", foreign_keys=[student_a_id])
+    student_b = relationship("User", foreign_keys=[student_b_id])
+
+
+class AiSimilarity(Base):
+    """Student-vs-AI-reference-solution similarity."""
+
+    __tablename__ = "ai_similarity"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    question_id = Column(String, ForeignKey("questions.id"), nullable=False)
+    student_id = Column(String, ForeignKey("users.id"), nullable=False)
+    score = Column(Float, nullable=False)  # 0-1
+    match_regions_json = Column(JSON, nullable=True)
+
+    question = relationship("Question", back_populates="ai_similarities")
+    student = relationship("User")
+
+
+class PerplexityScore(Base):
+    """Per-submission PolyCoder perplexity stats (avg + variance, z-scored)."""
+
+    __tablename__ = "perplexity_scores"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    submission_id = Column(
+        String, ForeignKey("submissions.id"), nullable=False, unique=True
+    )
+    avg_ppl = Column(Float, nullable=False)
+    variance_ppl = Column(Float, nullable=False)
+    zscore_avg = Column(Float, nullable=False)
+    zscore_variance = Column(Float, nullable=False)
+
+    submission = relationship("Submission", back_populates="perplexity_score")
+
+
+class FlagSummary(Base):
+    """
+    Combined weighted flag_score per (student, question) - see HANDOFF.md's
+    "Flag scoring formula". Stores each model's contributed weight % so the
+    dashboard (FlaggedStudents.jsx) can render a breakdown, not just a
+    single opaque number.
+    """
+
+    __tablename__ = "flag_summaries"
+
+    id = Column(String, primary_key=True, default=_uuid)
+    student_id = Column(String, ForeignKey("users.id"), nullable=False)
+    question_id = Column(String, ForeignKey("questions.id"), nullable=False)
+    total_score = Column(Float, nullable=False)
+    peer_weight_pct = Column(Float, nullable=False)
+    ai_ref_weight_pct = Column(Float, nullable=False)
+    perplexity_weight_pct = Column(Float, nullable=False)
+    # Id of the peer this student matched highest with, so TAs know who to
+    # cross-check (e.g. on WhatsApp) - per HANDOFF.md product spec.
+    top_matched_peer_id = Column(String, ForeignKey("users.id"), nullable=True)
+    status = Column(FlagStatusEnum, nullable=False, default="pending")
+
+    __table_args__ = (
+        UniqueConstraint(
+            "student_id", "question_id", name="uq_flag_summary_student_question"
+        ),
+    )
+
+    student = relationship(
+        "User", foreign_keys=[student_id], back_populates="flag_summaries"
+    )
+    top_matched_peer = relationship("User", foreign_keys=[top_matched_peer_id])
+    question = relationship("Question", back_populates="flag_summaries")
