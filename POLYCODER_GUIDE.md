@@ -82,51 +82,40 @@ Collect `avg` from every submission for a question into `class_values`
 before scoring individuals — the flag signal is relative-to-classmates, not
 an absolute cutoff, because difficulty varies per question.
 
-## Step 6 — Hugging Face Space endpoint (production)
+## Step 6 — Hugging Face Space endpoint (production) — ACTUAL, built 2026-09-12
+The team's Space (`DSA-Cheating-Detector`) was created via HF's Gradio
+template, not Docker+FastAPI as originally sketched here — so the real
+implementation uses Gradio's `api_name` feature instead of a raw REST route.
+Functionally equivalent, just a different calling convention (Step 7).
+Files live in `hf-space/` in the main repo — push them into the Space's own
+git repo (it's separate from this GitHub repo, cloned via the URL HF gave
+you when you created it):
 ```python
-# app.py inside the HF Space
-from fastapi import FastAPI
-from pydantic import BaseModel
-import statistics
-# ... paste model loading + line_perplexity from Steps 2-3 ...
+# hf-space/app.py — full working version, see that file for the real one
+import gradio as gr
+# ... model loading + line_perplexity from Steps 2-3 ...
 
-app = FastAPI()
+def score(code: str) -> str:
+    # same logic as file_stats(), but takes/returns a string since this
+    # crosses an HTTP boundary — see hf-space/app.py for the full body
+    ...
 
-class ScoreRequest(BaseModel):
-    code: str
-
-@app.post("/score")
-def score(req: ScoreRequest):
-    scores = []
-    for raw in req.code.splitlines():
-        line = raw.strip()
-        if not line:
-            continue
-        ppl = line_perplexity(line)
-        if ppl is not None:
-            scores.append(ppl)
-    return {
-        "avg": statistics.mean(scores),
-        "variance": statistics.pvariance(scores),
-        "n_lines": len(scores),
-    }
+demo = gr.Interface(fn=score, inputs=..., outputs=..., api_name="score")
+demo.launch()
 ```
-Deploy as a free CPU Basic Space (Docker or Python SDK). Render's free
-backend must NOT load these weights in-process (~700MB won't fit in ~512MB
-RAM) — it calls this endpoint over HTTP instead.
+Deployed as a free CPU Basic Space. Render's free backend must NOT load
+these weights in-process (~700MB won't fit in ~512MB RAM) — it calls this
+Space instead.
 
-## Step 7 — Backend calling the Space
+## Step 7 — Backend calling the Space — ACTUAL, via gradio_client
 ```python
-import requests
+from gradio_client import Client
+import json
 
 def get_perplexity_stats(code: str) -> dict:
-    resp = requests.post(
-        "https://<your-space-name>.hf.space/score",
-        json={"code": code},
-        timeout=30,  # free Spaces cold-start after idling
-    )
-    resp.raise_for_status()
-    return resp.json()
+    client = Client("your-username/DSA-Cheating-Detector")  # public Space, no token needed
+    result_json = client.predict(code, api_name="/score")
+    return json.loads(result_json)
 ```
 
 ## C/C++ tokenization note

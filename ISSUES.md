@@ -258,26 +258,33 @@ Backend Dockerfile for Render/Railway deploy. `.env.example` files listing every
 
 ---
 
-## 22. Deployment: Perplexity model host (HF Spaces) `[devops, models]`
+## 22. Deployment: Perplexity model host (HF Spaces) `[devops, models]` 🟡 IN PROGRESS
 
-**No repo file yet — separate HF Space repo.** Create a free Hugging Face
-account + a new Space (SDK: "Docker" or "Gradio", CPU Basic tier — free, no
-card required). In that Space, wrap `perplexity_service.py`'s `file_stats()`
-logic (loading `NinedayWang/PolyCoder-160M`) in a tiny FastAPI app with one
-endpoint: `POST /score` accepting `{code: str}`, returning
-`{avg, variance, n_lines}`. Have the main backend call this over HTTP inside
-`run_analysis.py` instead of loading the ~700MB model in-process — Render's
-free tier (~512MB RAM) cannot hold it.
+**Space created:** `DSA-Cheating-Detector` (Gradio SDK, CPU Basic, free).
+Files to push into it live in `hf-space/` in this repo (`app.py`,
+`requirements.txt`, `README.md`) — push them into the Space's own git repo,
+not this GitHub repo (it's a separate remote, cloned via the URL HF shows
+under Settings → "Clone this Space").
+
+Since HF's template created it as Gradio (not Docker+FastAPI as originally
+sketched), `app.py` exposes `score(code: str)` via Gradio's `api_name`
+feature rather than a raw REST route — the main backend calls it with the
+`gradio_client` package (already in `backend/requirements.txt`), not
+`requests`. See `POLYCODER_GUIDE.md` Steps 6–7 for the exact pattern.
+
+**Remaining work:** push the 3 files to the Space, confirm it builds and
+serves (Spaces auto-build on push, check the Space's "Logs" tab for errors),
+set `HF_SPACE_ID` in `backend/.env` to the real `username/space-name`.
 
 **Acceptance criteria:** the main backend's memory footprint stays under
-Render's free-tier limit with the model hosted externally; a `curl POST` to
-the Space's `/score` endpoint with a sample C file returns valid JSON within
-~10s (HF free Spaces cold-start after inactivity, budget for that in the
+Render's free-tier limit with the model hosted externally; calling the
+Space via `gradio_client` with a sample C file returns valid JSON within
+~10-20s (free Spaces cold-start after inactivity, budget for that in the
 batch job's timeout).
 
 ---
 
-## 23. Resources setup checklist `[devops, blocker]`
+## 23. Resources setup checklist `[devops, blocker]` 🟡 IN PROGRESS
 
 **No file — this is a one-time account-setup issue, do it before #1.**
 
@@ -286,10 +293,13 @@ resulting keys in `.env` files (never commit them):
 - [ ] GitHub — repo + free Actions minutes
 - [ ] Vercel — link to GitHub repo for frontend auto-deploy
 - [ ] Render — link to GitHub repo for backend auto-deploy (free web service)
-- [ ] Supabase — new project, grab `DATABASE_URL`, `SUPABASE_URL`,
-      `SUPABASE_ANON_KEY`, `SUPABASE_SERVICE_KEY`; create a Storage bucket
-      for PDFs/submissions
-- [ ] Hugging Face — account + new Space for PolyCoder hosting (issue #22)
+- [x] Supabase — project created, `SUPABASE_URL` + publishable key in hand.
+      Still need: DB password (for `DATABASE_URL`) and the secret key (for
+      `SUPABASE_SECRET_KEY`, needed once storage.py/#5 is built) from
+      Project Settings → API Keys.
+- [x] Hugging Face — Space `DSA-Cheating-Detector` created (see #22 above).
+      Still need: push the 3 files in `hf-space/`, confirm public vs
+      private (affects whether `gradio_client` needs a token).
 
 Full details and free-tier limits for each are in `RESOURCES.md`.
 

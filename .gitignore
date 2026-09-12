@@ -1,1 +1,23 @@
+# Secrets - never commit real values
+.env
+.env.local
+*.env
+!*.env.example
+
+# Python
+__pycache__/
+*.pyc
+venv/
+.venv/
+
+# Node / frontend build output
+node_modules/
+frontend/dist/
+frontend/.vite/
+
+# OS/editor cruft
+.DS_Store
+*.swp
+
+# cyhi local state (per-machine, not shared)
 cyhi-logs/.local/

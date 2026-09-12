@@ -22,6 +22,7 @@ file reads that row after verifying the token.
 
 import os
 import jwt  # pyjwt
+from jwt import PyJWKClient
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from sqlalchemy.orm import Session
@@ -29,13 +30,23 @@ from sqlalchemy.orm import Session
 from .db import get_db
 from .models import User
 
-SUPABASE_JWT_SECRET = os.environ.get("SUPABASE_JWT_SECRET")
-if not SUPABASE_JWT_SECRET:
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+if not SUPABASE_URL:
     raise RuntimeError(
-        "SUPABASE_JWT_SECRET is not set. Find it in Supabase dashboard -> "
-        "Project Settings -> API -> JWT Settings -> JWT Secret, and put it "
-        "in backend/.env"
+        "SUPABASE_URL is not set. Find it in Supabase dashboard -> "
+        "Project Settings -> API, and put it in backend/.env"
     )
+
+# Supabase now signs tokens with per-project JWT Signing Keys (asymmetric
+# ES256/RS256 by default for projects created since Nov 2025) rather than a
+# single static shared secret - projects on the new key system often don't
+# expose a legacy JWT secret at all. This fetches the project's public keys
+# from its JWKS endpoint and matches each token to the right key via its
+# "kid" header, so it works whether the project is on the new asymmetric
+# signing keys or still has legacy HS256 - no secret to copy/paste, and
+# nothing to update if the project rotates its signing keys later.
+JWKS_URL = f"{SUPABASE_URL}/auth/v1/.well-known/jwks.json"
+_jwk_client = PyJWKClient(JWKS_URL)
 
 bearer_scheme = HTTPBearer()
 
@@ -54,19 +65,17 @@ def decode_supabase_token(credentials: HTTPAuthorizationCredentials = Depends(be
     """
     token = credentials.credentials
     try:
-        # Supabase signs its JWTs with HS256 using the project's JWT secret.
-        # audience="authenticated" is the standard audience Supabase sets on
-        # every logged-in user's token.
+        signing_key = _jwk_client.get_signing_key_from_jwt(token)
         return jwt.decode(
             token,
-            SUPABASE_JWT_SECRET,
-            algorithms=["HS256"],
+            signing_key.key,
+            algorithms=["ES256", "RS256", "HS256"],
             audience="authenticated",
         )
     except jwt.ExpiredSignatureError:
         raise HTTPException(status_code=401, detail="token expired, please log in again")
-    except jwt.InvalidTokenError:
-        raise HTTPException(status_code=401, detail="invalid token")
+    except jwt.InvalidTokenError as e:
+        raise HTTPException(status_code=401, detail=f"invalid token: {e}")
 
 
 def get_current_user(
